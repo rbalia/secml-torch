@@ -47,6 +47,7 @@ native_adv_ds = native_attack(model, test_data_loader)
 n_robust_accuracy = Accuracy()(model, native_adv_ds)
 print("Robust Accuracy (PGD Native): ", n_robust_accuracy.item())
 
+
 # Create and run attack
 foolbox_attack = PGD(
     perturbation_model=perturbation_model,
