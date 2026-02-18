@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import time
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Literal
 
 import torch
+
+from secmlt.utils.tensor_utils import is_tensor, is_list_of_tensors
 from secmlt.adv.backends import Backends
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -176,9 +179,25 @@ class BaseEvasionAttack:
                     self.trackers.init_tracking()
 
             try:
-                x_adv, _ = self._run(model, samples, labels)
-                adversarials.append(x_adv)
-                original_labels.append(labels)
+                # EDITED ===============================================================================================
+                # Object-Detection batch format (List[Tensor])
+                if is_list_of_tensors(samples):
+                    for x, y in zip(samples, labels):
+                        x_adv, _ = self._run(model,x.unsqueeze(0),(y,))
+                        adversarials.append(x_adv.squeeze(0))
+                        original_labels.append(y)
+
+                # Classification batch format (batched Tensor)
+                elif is_tensor(samples):
+                    x_adv, _ = self._run(model, samples, labels)
+                    adversarials.append(x_adv)
+                    original_labels.append(labels)
+                else:
+                    msg = "Unsupported samples format. Expected either a Tensor for classification samples" \
+                          "or a List[Tensor] for object detection samples, " \
+                          f"but received type: {type(samples)}."
+                    raise TypeError(msg)
+                # END EDIT =============================================================================================
             finally:
                 # End tracking for current batch
                 if hasattr(self, "trackers") and self.trackers is not None:
@@ -187,13 +206,29 @@ class BaseEvasionAttack:
                             tracker.end_tracking()
                     else:
                         self.trackers.end_tracking()
-        adversarials = torch.vstack(adversarials)
-        original_labels = torch.hstack(original_labels)
-        adversarial_dataset = TensorDataset(adversarials, original_labels)
+        # EDITED =======================================================================================================
+        # Object-Detection batch format (List[Tensor])
+        if is_list_of_tensors(samples):
+            adversarial_dataset = list(zip(adversarials, original_labels))
+
+        # Classification batch format (batched Tensor)
+        elif is_tensor(samples):
+            adversarials = torch.vstack(adversarials)
+            original_labels = torch.hstack(original_labels)
+            adversarial_dataset = TensorDataset(adversarials, original_labels)
+        # Unsupported batch format
+        else:
+            msg = "Unsupported samples format. Expected either a Tensor for classification samples" \
+                  "or a List[Tensor] for object detection samples, " \
+                  f"but received type: {type(samples)}."
+            raise TypeError(msg)
+        # END EDIT =====================================================================================================
         return DataLoader(
             adversarial_dataset,
             batch_size=data_loader.batch_size,
+            collate_fn=data_loader.collate_fn
         )
+
 
     @property
     def trackers(self) -> list[TRACKER_TYPE] | None:

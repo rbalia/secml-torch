@@ -12,7 +12,7 @@ from secmlt.optimization.losses import LogitDifferenceLoss
 from secmlt.optimization.optimizer_factory import OptimizerFactory
 from secmlt.optimization.scheduler_factory import LRSchedulerFactory
 from secmlt.trackers.trackers import Tracker
-
+from utils.tensor_utils import is_tuple_of_dict, is_tensor
 
 if TYPE_CHECKING:
     from functools import partial
@@ -193,9 +193,44 @@ class ModularEvasionAttack(BaseEvasionAttack):
         tuple[torch.Tensor, torch.Tensor]
             Output scores and loss.
         """
-        scores = model.decision_function(x)
-        target = target.to(scores.device)
-        losses = self.loss_function(scores, target)
+        # EDITED =======================================================================================================
+        # Classification batch format (Tensor)
+        if is_tensor(target):
+            scores = model.decision_function(x)
+            target = target.to(scores.device)
+            losses = self.loss_function(scores, target)
+
+        # Object-Detection targets format (Tuple[Dict])
+        elif is_tuple_of_dict(target):
+            initial_mode = model.model.training
+
+            # Set the object detector to training mode, perform a forward pass, and compute the losses
+            model.model.train()
+            x = [xi.to(model._get_device()) for xi in x]
+            target = [{k: v.to(model._get_device()) for k, v in t.items()} for t in target]
+            losses = model.model(x, target)
+
+            # Set the detector to evaluation mode, perform a forward pass, and obtain predictions
+            model.model.eval()
+            scores = model.model(x)
+
+            # Restore the original training/evaluation mode
+            model.model.training = initial_mode
+
+            # TODO: Currently using the classification loss, but a dedicated bounding box loss is also available
+            # TODO: If you change the model, the loss keys may differ
+            losses = sum(losses.values())
+            #losses = losses["classification"]
+            #losses = losses["bbox_regression"]
+
+        # Unsupported targets type
+        else:
+            msg = "Unsupported target format. Expected either a Tensor for classification targets"\
+                  "or a Tuple[Dict[str, Tensor]] for object detection targets, "\
+                  f"but received type: {type(target)}."
+            raise TypeError(msg)
+        # END EDIT =====================================================================================================
+
         return scores, losses
 
     def _loss_and_grad(
@@ -248,11 +283,32 @@ class ModularEvasionAttack(BaseEvasionAttack):
         init_deltas: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         multiplier = 1 if self.y_target is not None else -1
-        target = (
-            torch.zeros_like(labels) + self.y_target
-            if self.y_target is not None
-            else labels
-        ).type(labels.dtype)
+
+        # EDITED =======================================================================================================
+        # Classification batch format (Tensor)
+        if is_tensor(labels):
+            target = (
+                torch.zeros_like(labels) + self.y_target
+                if self.y_target is not None
+                else labels
+            ).type(labels.dtype)
+
+        # Object-Detection targets format (Tuple[Dict])
+        elif is_tuple_of_dict(labels):
+            target = (
+                # TODO: this operation is not allowed if self.y_target is not None
+                torch.zeros_like(labels) + self.y_target
+                if self.y_target is not None
+                else labels
+            )
+
+        # Unsupported targets type
+        else:
+            msg = "Unsupported target format. Expected either a Tensor for classification targets" \
+                  "or a Tuple[Dict[str, Tensor]] for object detection targets, " \
+                  f"but received type: {type(labels)}."
+            raise TypeError(msg)
+        # END EDIT =====================================================================================================
 
         if init_deltas is not None:
             delta = init_deltas.data
